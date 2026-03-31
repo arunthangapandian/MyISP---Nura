@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: duplicate-bug-detector
+    runtime: node
+    buildCommand: npm run build
+    startCommand: npm start
+    envVars:
+      - key: AZURE_DEVOPS_ORG_URL
+        sync: false
+      - key: AZURE_DEVOPS_PROJECT
+        sync: false
+      - key: AZURE_DEVOPS_PAT
+        sync: false
+      - key: EMBEDDING_MODE
+        value: local
+      - key: SIMILARITY_THRESHOLD
+        value: "0.15"
+      - key: NODE_ENV
+        value: production

@@ -1,0 +1,15 @@
+{
+  "name": "duplicate-bug-detector",
+  "version": "1.0.0",
+  "description": "Full-stack duplicate bug detector using AI semantic similarity",
+  "scripts": {
+    "install:server": "cd server && npm install",
+    "install:client": "cd client && npm install",
+    "build:client": "cd client && npm run build",
+    "start": "cd server && node index.js",
+    "build": "npm run install:server && npm run install:client && npm run build:client"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
