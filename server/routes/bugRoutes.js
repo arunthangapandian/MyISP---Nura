@@ -57,20 +57,18 @@ router.post("/check-duplicate", async (req, res) => {
       return res.json({ duplicates: [], message: "No existing bugs found." });
     }
 
-    // Step 2: Build TF-IDF vocabulary from all bug texts (used in local mode)
+    // Step 2: Prepare text for embedding
     const userText = `${sanitizedTitle} ${sanitizedDescription}`;
+    // buildVocabulary is a no-op for neural mode, kept for backward compatibility
     const allTexts = existingBugs.map((b) => `${b.title} ${b.description}`);
-    allTexts.push(userText); // include user text in vocabulary
+    allTexts.push(userText);
     buildVocabulary(allTexts);
 
     // Step 3: Generate embedding for the user's input
     const userEmbedding = await getEmbedding(userText);
 
     // Step 4: Generate embeddings for each existing bug and compute similarity
-    const mode = (process.env.EMBEDDING_MODE || "local").toLowerCase();
-    // TF-IDF produces lower scores than neural embeddings, so use a lower default
-    const defaultThreshold = mode === "local" ? 0.15 : 0.75;
-    const threshold = parseFloat(process.env.SIMILARITY_THRESHOLD) || defaultThreshold;
+    const threshold = parseFloat(process.env.SIMILARITY_THRESHOLD) || 0.3;
     const allScored = [];
 
     for (const bug of existingBugs) {
