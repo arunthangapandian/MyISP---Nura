@@ -29,13 +29,13 @@ async function fetchBugsFromAzureDevOps(searchText = "") {
 
   const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
 
-  // Pass 1: Fetch 500 most recent bugs (broad coverage)
+  // Pass 1: Fetch 200 most recent bugs (balanced speed vs coverage)
   const recentIds = await runWiqlQuery(
     orgUrl, project, authHeader,
     `SELECT [System.Id] FROM WorkItems 
      WHERE [System.WorkItemType] = 'Bug' 
      ORDER BY [System.CreatedDate] DESC`,
-    500
+    200
   );
 
   // Pass 2 & 3: Keyword searches for older bugs matching the user's input

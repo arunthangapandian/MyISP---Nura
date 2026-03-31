@@ -105,7 +105,12 @@ router.post("/check-duplicate", async (req, res) => {
       .slice(0, 15)
       .map((b) => ({ ...b, matchTier: assignTier(b.similarity) }));
 
-    return res.json({ duplicates: topResults });
+    // Include Azure DevOps base URL so frontend can build TFS links
+    const orgUrl = process.env.AZURE_DEVOPS_ORG_URL || "";
+    const project = process.env.AZURE_DEVOPS_PROJECT || "";
+    const tfsBaseUrl = `${orgUrl}/${encodeURIComponent(project)}/_workitems/edit`;
+
+    return res.json({ duplicates: topResults, tfsBaseUrl });
   } catch (error) {
     const detail = error.response?.data?.message || error.message;
     console.error("Error in /check-duplicate:", detail);

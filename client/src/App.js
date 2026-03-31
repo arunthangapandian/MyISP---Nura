@@ -15,6 +15,7 @@ import "./App.css";
  */
 function App() {
   const [results, setResults] = useState([]);
+  const [tfsBaseUrl, setTfsBaseUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [searched, setSearched] = useState(false);
@@ -27,6 +28,7 @@ function App() {
     setLoading(true);
     setError("");
     setResults([]);
+    setTfsBaseUrl("");
     setSearched(false);
 
     try {
@@ -35,9 +37,10 @@ function App() {
       const response = await axios.post(
         `${apiBase}/api/check-duplicate`,
         bugData,
-        { timeout: 60000 } // 60s timeout for large datasets
+        { timeout: 300000 } // 5-minute timeout for AI model processing
       );
       setResults(response.data.duplicates || []);
+      setTfsBaseUrl(response.data.tfsBaseUrl || "");
       setSearched(true);
     } catch (err) {
       if (err.response && err.response.data && err.response.data.error) {
@@ -69,7 +72,7 @@ function App() {
         {error && <ErrorMessage message={error} />}
 
         {searched && !loading && !error && (
-          <ResultsList results={results} />
+          <ResultsList results={results} tfsBaseUrl={tfsBaseUrl} />
         )}
       </main>
     </div>

@@ -60,6 +60,12 @@ app.use(
 // Parse JSON bodies with a size limit (security: prevent large payload attacks)
 app.use(express.json({ limit: "1mb" }));
 
+// Increase server timeout for AI model processing (default 2min is too short)
+app.use((_req, res, next) => {
+  res.setTimeout(300000); // 5 minutes
+  next();
+});
+
 // API routes
 app.use("/api", bugRoutes);
 
