@@ -50,8 +50,8 @@ router.post("/check-duplicate", async (req, res) => {
     const sanitizedTitle = title.trim();
     const sanitizedDescription = description.trim();
 
-    // Step 1: Fetch existing bugs from Azure DevOps
-    const existingBugs = await fetchBugsFromAzureDevOps();
+    // Step 1: Fetch existing bugs from Azure DevOps (keyword-targeted + recent)
+    const existingBugs = await fetchBugsFromAzureDevOps(`${sanitizedTitle} ${sanitizedDescription}`);
 
     if (!existingBugs || existingBugs.length === 0) {
       return res.json({ duplicates: [], message: "No existing bugs found." });
@@ -68,7 +68,6 @@ router.post("/check-duplicate", async (req, res) => {
     const userEmbedding = await getEmbedding(userText);
 
     // Step 4: Generate embeddings for each existing bug and compute similarity
-    const threshold = parseFloat(process.env.SIMILARITY_THRESHOLD) || 0.3;
     const allScored = [];
 
     for (const bug of existingBugs) {
@@ -84,15 +83,27 @@ router.post("/check-duplicate", async (req, res) => {
       });
     }
 
-    // Sort by similarity descending
+    // Sort by similarity descending — exact matches come first naturally
     allScored.sort((a, b) => b.similarity - a.similarity);
 
-    // Log top 5 scores for debugging
-    console.log("Top 5 similarity scores:", allScored.slice(0, 5).map((b) => `${b.id}: ${b.similarity}`));
-    console.log("Threshold:", threshold);
+    // Log top 10 scores for debugging
+    console.log("Top 10 similarity scores:", allScored.slice(0, 10).map((b) => `${b.id}: ${(b.similarity * 100).toFixed(1)}%`));
 
-    // Filter by threshold and return top 5
-    const topResults = allScored.filter((b) => b.similarity >= threshold).slice(0, 5);
+    // Assign match tier labels based on similarity percentage
+    const assignTier = (score) => {
+      if (score >= 0.90) return "Exact Match";
+      if (score >= 0.70) return "Very High Match";
+      if (score >= 0.50) return "High Match";
+      if (score >= 0.35) return "Medium Match";
+      return "Low Match";
+    };
+
+    // Return top 15 results above a minimum threshold of 0.20
+    const MIN_THRESHOLD = 0.20;
+    const topResults = allScored
+      .filter((b) => b.similarity >= MIN_THRESHOLD)
+      .slice(0, 15)
+      .map((b) => ({ ...b, matchTier: assignTier(b.similarity) }));
 
     return res.json({ duplicates: topResults });
   } catch (error) {

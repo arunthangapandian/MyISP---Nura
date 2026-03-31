@@ -4,77 +4,185 @@
 const axios = require("axios");
 
 /**
- * Fetches existing bug work items from Azure DevOps using WIQL query.
- * Uses a Personal Access Token (PAT) for authentication.
+ * Fetches existing bug work items from Azure DevOps using a two-pass strategy:
+ * 1. Recent bugs (last 500 by creation date)
+ * 2. Keyword-targeted bugs matching the user's search terms (catches older exact matches)
  *
+ * Results are merged and deduplicated by ID.
+ *
+ * @param {string} [searchText=""] - Optional user search text for targeted keyword search
  * @returns {Promise<Array<{ id: number, title: string, description: string }>>}
- *   Array of bug objects with id, title, and description fields.
  * @throws {Error} If the Azure DevOps API call fails or config is missing.
  *
  * Security note: PAT is read from environment variables, never hardcoded.
  */
-async function fetchBugsFromAzureDevOps() {
+async function fetchBugsFromAzureDevOps(searchText = "") {
   const orgUrl = process.env.AZURE_DEVOPS_ORG_URL;
   const project = process.env.AZURE_DEVOPS_PROJECT;
   const pat = process.env.AZURE_DEVOPS_PAT;
 
-  // Validate required environment variables
   if (!orgUrl || !project || !pat) {
     throw new Error(
       "Azure DevOps configuration missing. Set AZURE_DEVOPS_ORG_URL, AZURE_DEVOPS_PROJECT, and AZURE_DEVOPS_PAT in .env"
     );
   }
 
-  // Security: build base64-encoded authorization header from PAT
   const authHeader = `Basic ${Buffer.from(`:${pat}`).toString("base64")}`;
 
-  // Step 1: Run a WIQL query to fetch bug work item IDs (limit with $top for efficiency)
-  const wiqlUrl = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=7.0&$top=200`;
+  // Pass 1: Fetch 500 most recent bugs (broad coverage)
+  const recentIds = await runWiqlQuery(
+    orgUrl, project, authHeader,
+    `SELECT [System.Id] FROM WorkItems 
+     WHERE [System.WorkItemType] = 'Bug' 
+     ORDER BY [System.CreatedDate] DESC`,
+    500
+  );
 
-  const wiqlQuery = {
-    query: `SELECT [System.Id] 
-            FROM WorkItems 
-            WHERE [System.WorkItemType] = 'Bug' 
-              AND [System.State] <> 'Closed' 
-            ORDER BY [System.CreatedDate] DESC`,
-  };
+  // Pass 2 & 3: Keyword searches for older bugs matching the user's input
+  let preciseIds = [];
+  let broadIds = [];
+  if (searchText) {
+    const keywords = extractKeywords(searchText);
+    if (keywords.length > 0) {
+      // Pass 2: PRECISE search — AND combination of top 3 keywords
+      // This targets bugs with titles closely matching the user's input
+      if (keywords.length >= 2) {
+        const andClauses = keywords
+          .slice(0, 3)
+          .map((kw) => `[System.Title] CONTAINS '${escapeWiql(kw)}'`);
+        const andFilter = andClauses.join(" AND ");
 
-  const wiqlResponse = await axios.post(wiqlUrl, wiqlQuery, {
-    headers: {
-      Authorization: authHeader,
-      "Content-Type": "application/json",
-    },
-    timeout: 30000, // 30-second timeout for resource efficiency
-  });
+        preciseIds = await runWiqlQuery(
+          orgUrl, project, authHeader,
+          `SELECT [System.Id] FROM WorkItems 
+           WHERE [System.WorkItemType] = 'Bug' 
+             AND ${andFilter}
+           ORDER BY [System.CreatedDate] DESC`,
+          200
+        );
+        console.log(`Precise AND search (${keywords.slice(0, 3).join('+')}) found ${preciseIds.length} bugs`);
+      }
 
-  const workItemRefs = wiqlResponse.data.workItems;
-  if (!workItemRefs || workItemRefs.length === 0) {
-    return [];
+      // Pass 3: BROAD search — OR combination of top 5 keywords
+      const orClauses = keywords
+        .slice(0, 5)
+        .map((kw) => `[System.Title] CONTAINS '${escapeWiql(kw)}'`);
+      const orFilter = orClauses.join(" OR ");
+
+      broadIds = await runWiqlQuery(
+        orgUrl, project, authHeader,
+        `SELECT [System.Id] FROM WorkItems 
+         WHERE [System.WorkItemType] = 'Bug' 
+           AND (${orFilter})
+         ORDER BY [System.CreatedDate] DESC`,
+        200
+      );
+      console.log(`Broad OR search found ${broadIds.length} bugs`);
+    }
   }
 
-  // Limit to 200 most recent bugs for efficiency (Green Software: avoid excessive API calls)
-  const ids = workItemRefs.slice(0, 200).map((item) => item.id);
+  // Merge and deduplicate IDs
+  const allIdsSet = new Set([...recentIds, ...preciseIds, ...broadIds]);
+  const allIds = Array.from(allIdsSet);
+  console.log(`Fetching ${allIds.length} bugs total (${recentIds.length} recent + ${preciseIds.length} precise + ${broadIds.length} broad, ${allIds.length} unique)`);
 
-  // Step 2: Batch-fetch work item details (fields: Id, Title, Description)
-  // Azure DevOps API supports batching up to 200 IDs at once
-  const idsParam = ids.join(",");
-  const detailsUrl = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems?ids=${idsParam}&fields=System.Id,System.Title,System.Description&api-version=7.0`;
+  if (allIds.length === 0) return [];
 
-  const detailsResponse = await axios.get(detailsUrl, {
-    headers: {
-      Authorization: authHeader,
-    },
-    timeout: 30000,
-  });
+  // Batch-fetch work item details
+  const bugs = await fetchWorkItemDetails(orgUrl, project, authHeader, allIds);
+  return bugs;
+}
 
-  // Step 3: Map response to clean bug objects
-  const bugs = detailsResponse.data.value.map((item) => ({
-    id: item.id,
-    title: item.fields["System.Title"] || "",
-    description: stripHtml(item.fields["System.Description"] || ""),
-  }));
+/**
+ * Runs a WIQL query and returns work item IDs.
+ * @param {string} orgUrl - Azure DevOps org URL
+ * @param {string} project - Project name
+ * @param {string} authHeader - Authorization header
+ * @param {string} query - WIQL query string
+ * @param {number} top - Max results
+ * @returns {Promise<number[]>} Array of work item IDs
+ */
+async function runWiqlQuery(orgUrl, project, authHeader, query, top) {
+  try {
+    const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=7.0&$top=${top}`;
+    const resp = await axios.post(url, { query }, {
+      headers: { Authorization: authHeader, "Content-Type": "application/json" },
+      timeout: 30000,
+    });
+    return (resp.data.workItems || []).map((item) => item.id);
+  } catch (err) {
+    console.error("WIQL query error:", err.response?.data?.message || err.message);
+    return [];
+  }
+}
+
+/**
+ * Batch-fetches work item details for the given IDs (200 per batch).
+ * @param {string} orgUrl - Azure DevOps org URL
+ * @param {string} project - Project name
+ * @param {string} authHeader - Authorization header
+ * @param {number[]} ids - Work item IDs
+ * @returns {Promise<Array<{ id: number, title: string, description: string }>>}
+ */
+async function fetchWorkItemDetails(orgUrl, project, authHeader, ids) {
+  const BATCH_SIZE = 200;
+  const bugs = [];
+
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const batch = ids.slice(i, i + BATCH_SIZE);
+    const idsParam = batch.join(",");
+    const url = `${orgUrl}/${encodeURIComponent(project)}/_apis/wit/workitems?ids=${idsParam}&fields=System.Id,System.Title,System.Description&api-version=7.0`;
+
+    const resp = await axios.get(url, {
+      headers: { Authorization: authHeader },
+      timeout: 30000,
+    });
+
+    const batchBugs = resp.data.value.map((item) => ({
+      id: item.id,
+      title: item.fields["System.Title"] || "",
+      description: stripHtml(item.fields["System.Description"] || ""),
+    }));
+
+    bugs.push(...batchBugs);
+  }
 
   return bugs;
+}
+
+/**
+ * Extracts meaningful keywords from text for WIQL search.
+ * Removes common short words and returns unique significant words.
+ * @param {string} text - Input text
+ * @returns {string[]} Array of keywords (longest first for best matching)
+ */
+function extractKeywords(text) {
+  const stopwords = new Set([
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "to", "of", "in", "for", "on", "with",
+    "at", "by", "from", "as", "into", "through", "during", "before", "after",
+    "not", "no", "but", "and", "or", "if", "it", "its", "this", "that",
+    "test", "testing", "bug", "issue", "error", "problem",
+  ]);
+
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !stopwords.has(w));
+
+  // Deduplicate and sort by length descending (longer = more specific)
+  return [...new Set(words)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Escapes single quotes in WIQL strings to prevent injection.
+ * @param {string} str - Input string
+ * @returns {string} Escaped string safe for WIQL
+ */
+function escapeWiql(str) {
+  return str.replace(/'/g, "''");
 }
 
 /**
